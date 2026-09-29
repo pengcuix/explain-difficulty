@@ -1,132 +1,140 @@
 # Explain Difficulty
 
-Two packages: estimate question difficulty from model responses, then discover
-natural-language hypotheses explaining that difficulty.
+Fit IRT to a response matrix, then discover and select hypotheses explaining item difficulty.
+The code has two packages: `irt` and `hypotheses`.
 
 ## Install
 
-Python 3.10 or newer:
+Python 3.10 or newer, from the repository root:
 
 ```bash
 python -m pip install -e '.[irt,hypotheses]'
 ```
 
-Install `.[irt]` or `.[hypotheses]` separately if only one stage is needed.
-The hypothesis package uses the Gemini API and a local sentence embedding model.
-Set `GEMINI_API_KEY` in your environment; never put credentials in input files.
-The default embedding model is `Qwen/Qwen3-Embedding-4B`, downloaded on first use.
-It requires sufficient disk space and memory; use `--embedding-model` to override.
-Model identifiers are configurable because API availability can change.
-
 ## 1. Fit IRT
 
-Input: a NumPy `.npy` matrix with **questions in rows, models in columns**.
-Entries are `0` (incorrect), `1` (correct), and `-1` or `NaN` (missing).
-Missing responses are excluded, not treated as incorrect. All-missing rows/columns
-and non-binary observed responses are rejected. Optional ID files are JSON lists
-in matrix order. Without them, IDs are zero-based index strings.
+Provide `data/responses.npy`: a NumPy matrix with **questions in rows and models in
+columns**. Use `1` for correct, `0` for incorrect, and `-1` or `NaN` for missing.
+Missing entries are excluded from fitting. All-missing rows or columns are rejected.
 
 ```bash
-fit-irt --responses responses.npy \
-  --item-ids item_ids.json --model-ids model_ids.json
+python -m irt.fit --responses data/responses.npy --epochs 500 --lr 0.1 --seed 0 --output output/irt_results.json
 ```
 
-Output: **`output/irt_results.json`**, with `items` (ID, difficulty, posterior SD),
-`models` (ID, ability, posterior SD), fit settings, and input checksum.
-The hierarchical 1PL model uses `P(correct) = sigmoid(ability - difficulty)`.
-We use py-irt's stochastic variational inference, default 500 epochs, CPU, seed 0.
-Means and SDs come from the same final variational iterate. Posterior SD is not
-the standard deviation of difficulties across questions. Larger difficulty is
-harder; the scale is relative to the fitted response panel. Fit separate benchmarks
-separately unless a common scale is intentionally desired. Inspect fit quality
-and sensitivity to epochs; a finite fit alone does not establish convergence.
+- `--responses`: input response matrix.
+- `--epochs`, `--lr`: number of fitting epochs and initial learning rate.
+- `--seed`: random seed.
+- `--output`: JSON containing item difficulties, model abilities and posterior SDs.
+
+The model is hierarchical 1PL, fitted with py-irt on CPU:
+`P(correct) = sigmoid(ability - difficulty)`. Larger difficulty means harder.
+Check convergence when choosing the number of epochs.
+
+By default, item ID `"0"` is matrix row 0, `"1"` is row 1, and so on. To use your own
+IDs, add `--item-ids data/item_ids.json`; this must be a JSON list in matrix row order.
+`--model-ids data/model_ids.json` similarly supplies IDs in column order.
 
 ## 2. Discover hypotheses
 
-Input `items.jsonl`: one JSON object per line with a unique `item_id` and `question`.
-Optional `answer` and `explanation` fields are included in generation and matching.
-Use complete reference answers/explanations when available; the package does not
-generate them. IDs are normalized to strings and joined by ID, never by position.
-
-```json
-{"item_id": "0", "question": "What is 2 + 3?", "answer": "5", "explanation": "Add the two quantities."}
-```
-
-Difficulty can come from the IRT output or an external JSON list of
-`{"item_id": "0", "difficulty": 1.2}` records on the same scale.
+### 2.1 Configure the API key
 
 ```bash
-# Validate input and sampling before making any paid calls.
-discover-hypotheses --items items.jsonl --difficulty output/irt_results.json
-
-# Run; completed valid API responses are reused automatically after interruption.
-discover-hypotheses --items items.jsonl --difficulty output/irt_results.json --execute
+export GEMINI_API_KEY="your-api-key"
 ```
 
-Default protocol:
+Only generation, refinement and matching need the API. IRT, preprocessing and Lasso
+selection run locally. Do not commit your key.
 
-1. Difficulty-stratified, disjoint G/V/T splits, with V=400 and T=200; G is the
-   remainder. Override sizes or pass `--splits splits.json` containing G/V/T ID
-   lists covering exactly the input items. Group sampling requires at least 20
-   G items in each of ten rank buckets (at least 200 G items).
-2. **30 group rounds**, each showing 20 hard and 20 easy items. Bucket gaps are
-   at least 3; bucket-pair weights are `gap^2/(1+previous_count)`, and within-bucket
-   item weights are `1/(1+previous_count)`; no within-round replacement.
-3. **50 pair rounds**, each showing five disjoint hard/easy pairs, minimum IRT
-   gap 4.0 (`--min-gap`). Pairs are not topic-matched or bucket-sampled. Pair
-   weights penalize previous item use with exponent 2 and pair use with exponent 1.
-   Sampling plans are determined before generation. Total: **1,700 item
-   presentations**, not necessarily 1,700 distinct questions. If no valid plan
-   exists, execution stops rather than silently lowering the difficulty gap.
-4. Exact-text deduplication, then strict semantic deduplication over all
-   embedding-cosine pairs above 0.85, with joint component review retaining
-   unchanged representatives. The survivors undergo semantic-family pair review
-   and joint refinement using the same cosine threshold. Distinct criteria remain
-   separate; redundant classes keep an original or receive one rewritten criterion.
-   Similarity/transitivity alone never deletes a hypothesis. No item labels or test
-   metrics guide refinement.
-5. Every final hypothesis is freshly matched against every input question in
-   chunks of 40, producing strictly binary labels. Difficulty is hidden from
-   matching. Rewritten hypotheses are not assigned their predecessors' labels.
-6. Stability selection on **V only**: 100 subsamples of 75% of V, five-fold CV
-   choosing Lasso alpha from 25 log-spaced values between 1e-4 and 1, with scaling
-   fitted inside each fold. Rank by selection frequency, breaking ties by mean
-   absolute standardized coefficient, then original order. Select the first 20
-   with nonzero frequency (`--top-k`). G/T labels are exported but not used for
-   selection. Top-k is fixed by the user, not optimized on T.
+### 2.2 Prepare questions and splits
 
-Output: **`output/hypotheses_results.json`** contains refined hypothesis texts,
-ranking, selection flags, raw/distinct/refined counts, splits, settings, and a
-binary matching matrix with explicit row item IDs and column hypothesis IDs.
-Raw counts include repeated generated statements. `--debug` additionally embeds
-raw candidates, joint refinement decisions, and the sampling plan in that file.
-No separate intermediate result files are produced.
+Provide a JSON list (`data/items.json`), CSV, or JSONL file. Each record needs
+`item_id` and `question`; `answer` and `explanation` are optional reference fields.
+When present, both are included in generation and matching.
 
-Validated API responses live in **`.cache/hypotheses/`**, excluded from Git.
-Rerun the same command to reuse them. Requests are keyed by full prompt and model
-settings, so changed inputs do not reuse stale matches. Keep this cache until a
-run finishes; removing it may cause additional API charges. Retries can incur
-charges, including when a server processes a request but the client loses its
-response. Output files are never overwritten; choose a new `--output` path.
-Do not run concurrent processes against the same cache/output directory.
+```json
+[
+  {"item_id": "0", "question": "What is 2 + 3?", "answer": "5", "explanation": "Add the two quantities."},
+  {"item_id": "1", "question": "What is 8 - 2?", "answer": "6", "explanation": "Subtract 2 from 8."}
+]
+```
 
-Default models: `gemini-3.1-pro-preview` for generation/refinement and
-`gemini-3.7-flash` for matching, temperature 0, low thinking. Override with
-`--propose-model` / `--match-model`. All prompts are in `hypotheses/prompts.py`.
-There is no automatic model fallback. API calls are serial, validated, and retried
-up to three times. A dry run reports generation calls and presentation counts;
-total matching/refinement cost depends on the generated pool and is not estimated.
+For CSV, use the same field names as column headers. Include **every question from
+the response matrix**, with the same IDs used in step 1. Records may be shuffled:
+the code joins by ID and restores matrix order, not file row order. Without custom
+IDs, `item_id: "7"` therefore means row 7 of `responses.npy` (the eighth question).
 
-## Scope and reproducibility
+```bash
+python -m hypotheses.discover prepare --items data/items.json --difficulty output/irt_results.json --responses data/responses.npy --v-size 400 --t-size 200 --seed 0 --output .cache/prepared.json
+```
 
-This is the compact **30+50 method implementation**, not a byte-for-byte reproduction
-of every historical paper run. Historical experiments differed in round budgets,
-candidate-pool provenance and selection settings. This release retains text-only
-strict deduplication followed by semantic-family refinement, without the historical
-manual recovery/re-audit entry points; prompts are consolidated for arbitrary datasets.
-The sampling seed is reproducible, but external model outputs can vary even at
-temperature zero. Baselines, question rewriting, plotting, benchmark data, cached
-API responses, and private infrastructure scripts are not distributed.
+- `--items`: question file; change the path to use CSV or JSONL.
+- `--difficulty`: IRT result from step 1, joined to questions by `item_id`.
+- `--responses`: verifies that the original `.npy` file matches the IRT fit's checksum and shape.
+- `--v-size`, `--t-size`: numbers of items assigned to V (selection) and T (held out).
+  The remainder form G (generation). Splits are disjoint and difficulty-stratified.
+- `--seed`: split seed; `--output`: prepared questions, difficulties and splits.
+
+Choose sizes appropriate for your dataset: G needs at least 200 questions and V
+needs at least 14 for the default selection settings. To reuse existing splits,
+add `--splits data/splits.json` containing `{"G": [...], "V": [...], "T": [...]}`
+with item-ID lists; this overrides the split sizes and must cover all input items.
+
+### 2.3 Generate, refine and match
+
+```bash
+python -m hypotheses.discover generate --input .cache/prepared.json --group-rounds 30 --pair-rounds 50 --min-gap 4.0 --propose-model gemini-3.1-pro-preview --match-model gemini-3.7-flash --output output/hypotheses_results.json --execute
+```
+
+- `--input`: prepared file from step 2.2, already aligned to the response matrix.
+- `--group-rounds`: rounds showing 20 harder and 20 easier G items per round.
+- `--pair-rounds`: rounds showing five hard/easy G pairs per round.
+- `--min-gap`: minimum IRT difficulty gap within each pair.
+- `--propose-model`, `--match-model`: API models for generation/refinement and matching.
+- `--execute`: enables paid API calls. Omit it to validate sampling without calling the API.
+- `--output`: refined hypotheses and a binary item-by-hypothesis matching matrix.
+
+This runs **30 group + 50 pair rounds** by default, followed by exact-text and strict
+semantic deduplication, semantic-family refinement, and fresh matching against all
+questions. Generation uses G only; matching does not expose difficulty to the judge.
+The default cosine threshold is 0.85 (`--threshold`). The local embedding model is
+`Qwen/Qwen3-Embedding-4B` (`--embedding-model`); its weights download on first use
+and require sufficient memory. Model names can be changed to ones your account supports.
+
+If the requested sampling plan is infeasible, the command stops before API calls.
+Validated responses are cached in `.cache/hypotheses/`; rerun an interrupted command
+to reuse them. Keep the cache to avoid repeat calls. Retries may incur extra charges.
+IRT, preparation and generation do not overwrite existing outputs.
+
+### 2.4 Select hypotheses with stability Lasso
+
+```bash
+python -m hypotheses.discover select --input output/hypotheses_results.json --top-k 20 --repeats 100 --sample-fraction 0.75 --cv-folds 5 --seed 0
+```
+
+- `--input`: hypotheses, matches and difficulties saved in step 2.3.
+- `--top-k`: maximum number of hypotheses to retain; fixed by you, not tuned on T.
+- `--repeats`: number of Lasso fits on random subsamples of V.
+- `--sample-fraction`: fraction of V sampled without replacement per fit.
+- `--cv-folds`: folds used to choose the regularization weight within each subsample.
+- `--seed`: subsampling and cross-validation seed.
+
+Each fit chooses its own Lasso alpha by cross-validation over 25 log-spaced values
+from `1e-4` to `1`. Features are standardized inside each fold. Hypotheses are ranked
+by nonzero-coefficient frequency, then mean absolute standardized coefficient.
+At most `--top-k` hypotheses with nonzero frequency are retained. Only V is used.
+
+Selection adds `selected`, `rank` and `selection_frequency` to each hypothesis in
+the **same result JSON**, preserving hypothesis order and matching-matrix alignment.
+The previous file is backed up in `.cache/hypotheses/`. Add `--output new_result.json`
+to save separately. You can rerun selection with different settings without API calls.
+
+The two main outputs are `output/irt_results.json` and `output/hypotheses_results.json`.
+The latter includes explicit row item IDs, column hypothesis IDs, splits and selection
+settings. Temporary preparation data and API caches stay in `.cache/` (ignored by Git).
+Do not run concurrent commands against the same output or cache directory.
+
+Prompts are in `hypotheses/prompts.py`. This release provides the consolidated 30+50
+workflow; historical run settings and external model outputs can differ.
 
 ## Tests
 
@@ -135,5 +143,4 @@ python -m pip install -e '.[irt,hypotheses,test]'
 python -m pytest -q
 ```
 
-Tests use a small synthetic response matrix and mocked generation/refinement/
-matching responses; they do not invoke paid APIs or download embedding weights.
+Tests use synthetic data and mocked API responses; no paid API calls are made.

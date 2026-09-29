@@ -1,6 +1,7 @@
 """Generate, refine, match and select hypotheses with 30 group + 50 pair rounds."""
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -32,18 +33,29 @@ def require(condition, message):
 
 
 def read_items(items_path, difficulty_path):
-    records = [
-        json.loads(line)
-        for line in Path(items_path).read_text().splitlines()
-        if line.strip()
-    ]
+    path = Path(items_path)
+    if path.suffix.lower() == ".csv":
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            records = list(csv.DictReader(stream))
+    elif path.suffix.lower() == ".json":
+        records = json.loads(path.read_text())
+    else:
+        require(path.suffix.lower() == ".jsonl", "Items must be JSON, JSONL or CSV.")
+        records = [
+            json.loads(line) for line in path.read_text().splitlines() if line.strip()
+        ]
+    require(isinstance(records, list), "JSON items must be a list of objects.")
     payload = json.loads(Path(difficulty_path).read_text())
     parameters = payload["items"] if isinstance(payload, dict) else payload
     difficulty = {str(r["item_id"]): float(r["difficulty"]) for r in parameters}
     require(len(difficulty) == len(parameters), "Duplicate difficulty item IDs.")
     seen, items = set(), []
     for row in records:
+        require(
+            isinstance(row, dict) and row.get("item_id") is not None, "Missing item_id."
+        )
         iid = str(row["item_id"])
+        require(bool(iid.strip()), "Empty item_id.")
         require(iid not in seen, f"Duplicate item ID: {iid}")
         require(
             iid in difficulty and np.isfinite(difficulty[iid]),
@@ -56,11 +68,25 @@ def read_items(items_path, difficulty_path):
         seen.add(iid)
         text = row["question"]
         for key in ["answer", "explanation"]:
-            if row.get(key) is not None:
+            if row.get(key) not in (None, ""):
                 text += f"\n{key.title()}: {row[key]}"
         items.append({"item_id": iid, "text": text, "difficulty": difficulty[iid]})
     require(bool(items), "No items supplied.")
-    return items
+    require(
+        seen == set(difficulty),
+        "Items must cover exactly the IRT item IDs; some questions are missing.",
+    )
+    # Keep matrix order even if question records are shuffled.
+    by_id = {r["item_id"]: r for r in items}
+    return [by_id[i] for i in difficulty]
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def make_splits(items, v_size, t_size, seed, supplied=None):
@@ -534,19 +560,44 @@ def match(items, hypotheses, client, model):
     return np.asarray(matrix, dtype=int)
 
 
-def select(matrix, items, splits, top_k=20, repeats=100, seed=0):
+def select(
+    matrix,
+    items,
+    splits,
+    top_k=20,
+    repeats=100,
+    seed=0,
+    sample_fraction=0.75,
+    cv_folds=5,
+):
     from sklearn.linear_model import Lasso
     from sklearn.model_selection import GridSearchCV, KFold
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
     require(top_k > 0 and repeats > 0, "top-k and repeats must be positive.")
+    require(
+        0 < sample_fraction <= 1 and cv_folds >= 2,
+        "Invalid subsampling/CV configuration.",
+    )
+    make_splits(items, 0, 0, seed, splits)
     positions = {r["item_id"]: i for i, r in enumerate(items)}
+    require(len(positions) == len(items), "Duplicate item IDs.")
+    matrix = np.asarray(matrix)
+    require(
+        matrix.ndim == 2 and matrix.shape[0] == len(items) and matrix.shape[1] > 0,
+        "Matching matrix must have one row per item and at least one hypothesis.",
+    )
+    require(np.isin(matrix, [0, 1]).all(), "Matching matrix must be binary.")
     rows = [positions[i] for i in splits["V"]]
-    X = np.asarray(matrix)[rows]
-    y = np.array([items[i]["difficulty"] for i in rows])
-    size = int(len(rows) * 0.75)
-    require(size >= 10, "Selection requires at least 14 V items.")
+    X = matrix[rows]
+    y = np.array([items[i]["difficulty"] for i in rows], dtype=float)
+    require(np.isfinite(y).all(), "V difficulties must be finite.")
+    size = int(len(rows) * sample_fraction)
+    require(
+        size >= max(10, 2 * cv_folds),
+        "Each V subsample needs at least 10 items and two per CV fold.",
+    )
     frequency = np.zeros(X.shape[1])
     magnitude = np.zeros(X.shape[1])
     alphas = []
@@ -557,7 +608,7 @@ def select(matrix, items, splits, top_k=20, repeats=100, seed=0):
         search = GridSearchCV(
             make_pipeline(StandardScaler(), Lasso(max_iter=100000)),
             {"lasso__alpha": np.logspace(-4, 0, 25)},
-            cv=KFold(5, shuffle=True, random_state=seed + repeat),
+            cv=KFold(cv_folds, shuffle=True, random_state=seed + repeat),
             scoring="neg_mean_squared_error",
             error_score="raise",
         )
@@ -574,9 +625,11 @@ def select(matrix, items, splits, top_k=20, repeats=100, seed=0):
     chosen = [i for i in order if frequency[i] > 0][:top_k]
     return {
         "fit_split": "V",
+        "top_k": top_k,
         "repeats": repeats,
-        "sample_fraction": 0.75,
-        "cv_folds": 5,
+        "seed": seed,
+        "sample_fraction": sample_fraction,
+        "cv_folds": cv_folds,
         "selected_indices": chosen,
         "ranking": order,
         "frequency": frequency.tolist(),
@@ -604,29 +657,26 @@ def run(items, splits, plan, client, args, encode=None):
         args.threshold,
         encode,
     )
+    require(bool(hypotheses), "No hypotheses survived refinement.")
     matrix = match(items, hypotheses, client, args.match_model)
-    selection = select(matrix, items, splits, args.top_k, args.repeats, args.seed)
-    chosen = set(selection["selected_indices"])
-    ranks = {i: n + 1 for n, i in enumerate(selection["ranking"])}
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "config": {
             k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
         },
         "splits": splits,
+        "items": [
+            {"item_id": r["item_id"], "difficulty": r["difficulty"]} for r in items
+        ],
         "counts": {
             "raw_candidates": len(raw),
             "distinct_candidates": len({r["text"] for r in raw}),
             "refined": len(hypotheses),
-            "selected": len(chosen),
         },
         "hypotheses": [
             {
                 "hypothesis_id": f"H{i + 1:03d}",
                 "text": h,
-                "selected": i in chosen,
-                "rank": ranks[i],
-                "selection_frequency": selection["frequency"][i],
             }
             for i, h in enumerate(hypotheses)
         ],
@@ -635,7 +685,6 @@ def run(items, splits, plan, client, args, encode=None):
             "hypothesis_ids": [f"H{i + 1:03d}" for i in range(len(hypotheses))],
             "values": matrix.tolist(),
         },
-        "selection": selection,
     }
     if args.debug:
         result["debug"] = {
@@ -646,77 +695,229 @@ def run(items, splits, plan, client, args, encode=None):
     return result
 
 
+def apply_selection(
+    result, top_k=20, repeats=100, seed=0, sample_fraction=0.75, cv_folds=5
+):
+    """Add selection results without changing hypothesis or matching order."""
+    items = result["items"]
+    matches = result["matches"]
+    hypotheses = result["hypotheses"]
+    ids = [h["hypothesis_id"] for h in hypotheses]
+    require(len(ids) == len(set(ids)), "Duplicate hypothesis IDs.")
+    require(
+        matches["item_ids"] == [r["item_id"] for r in items],
+        "Matching rows do not align with item difficulties.",
+    )
+    require(
+        matches["hypothesis_ids"] == ids,
+        "Matching columns do not align with hypotheses.",
+    )
+    matrix = np.asarray(matches["values"])
+    require(
+        matrix.ndim == 2 and matrix.shape[1] == len(hypotheses),
+        "Matching matrix has the wrong number of columns.",
+    )
+    selection = select(
+        matrix, items, result["splits"], top_k, repeats, seed, sample_fraction, cv_folds
+    )
+    chosen = set(selection["selected_indices"])
+    ranks = {i: n + 1 for n, i in enumerate(selection["ranking"])}
+    # Build a new object; leave the input intact if validation or fitting fails.
+    return {
+        **result,
+        "counts": {**result["counts"], "selected": len(chosen)},
+        "hypotheses": [
+            {
+                **h,
+                "selected": i in chosen,
+                "rank": ranks[i],
+                "selection_frequency": selection["frequency"][i],
+            }
+            for i, h in enumerate(hypotheses)
+        ],
+        "selection": selection,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--items", type=Path, required=True)
-    parser.add_argument("--difficulty", type=Path, required=True)
-    parser.add_argument("--splits", type=Path)
-    parser.add_argument("--v-size", type=int, default=400)
-    parser.add_argument("--t-size", type=int, default=200)
-    parser.add_argument("--group-rounds", type=int, default=30)
-    parser.add_argument("--pair-rounds", type=int, default=50)
-    parser.add_argument("--min-gap", type=float, default=4.0)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--propose-model", default="gemini-3.1-pro-preview")
-    parser.add_argument("--match-model", default="gemini-3.7-flash")
-    parser.add_argument("--embedding-model", default="Qwen/Qwen3-Embedding-4B")
-    parser.add_argument("--threshold", type=float, default=0.85)
-    parser.add_argument("--context", default="")
-    parser.add_argument("--top-k", type=int, default=20)
-    parser.add_argument("--repeats", type=int, default=100)
-    parser.add_argument("--cache", type=Path, default=Path(".cache/hypotheses"))
-    parser.add_argument(
+    commands = parser.add_subparsers(dest="command", required=True)
+    prep = commands.add_parser(
+        "prepare", help="Join questions to IRT estimates and split G/V/T."
+    )
+    prep.add_argument(
+        "--items", type=Path, required=True, help="JSON list, JSONL or CSV."
+    )
+    prep.add_argument("--difficulty", type=Path, required=True, help="IRT output JSON.")
+    prep.add_argument(
+        "--responses", type=Path, help="Verify the original .npy checksum and shape."
+    )
+    prep.add_argument(
+        "--splits", type=Path, help="Optional JSON object with G/V/T item-ID lists."
+    )
+    prep.add_argument("--v-size", type=int, default=400)
+    prep.add_argument("--t-size", type=int, default=200)
+    prep.add_argument("--seed", type=int, default=0)
+    prep.add_argument("--output", type=Path, default=Path(".cache/prepared.json"))
+
+    gen = commands.add_parser(
+        "generate", help="Generate, refine and match hypotheses (no Lasso)."
+    )
+    gen.add_argument(
+        "--input", type=Path, required=True, help="Prepared items and splits."
+    )
+    gen.add_argument("--group-rounds", type=int, default=30)
+    gen.add_argument("--pair-rounds", type=int, default=50)
+    gen.add_argument("--min-gap", type=float, default=4.0)
+    gen.add_argument("--seed", type=int, default=0)
+    gen.add_argument("--propose-model", default="gemini-3.1-pro-preview")
+    gen.add_argument("--match-model", default="gemini-3.7-flash")
+    gen.add_argument("--embedding-model", default="Qwen/Qwen3-Embedding-4B")
+    gen.add_argument("--threshold", type=float, default=0.85)
+    gen.add_argument(
+        "--context", default="", help="Optional dataset description for the proposer."
+    )
+    gen.add_argument("--cache", type=Path, default=Path(".cache/hypotheses"))
+    gen.add_argument(
         "--output", type=Path, default=Path("output/hypotheses_results.json")
     )
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument(
+    gen.add_argument("--debug", action="store_true")
+    gen.add_argument(
         "--execute",
         action="store_true",
-        help="Required for paid model calls; otherwise dry run.",
+        help="Enable paid API calls; otherwise dry run.",
     )
+
+    sel = commands.add_parser(
+        "select", help="Run stability Lasso using V only; no API calls."
+    )
+    sel.add_argument(
+        "--input", type=Path, required=True, help="Generated hypotheses result JSON."
+    )
+    sel.add_argument("--top-k", type=int, default=20)
+    sel.add_argument("--repeats", type=int, default=100)
+    sel.add_argument("--sample-fraction", type=float, default=0.75)
+    sel.add_argument("--cv-folds", type=int, default=5)
+    sel.add_argument("--seed", type=int, default=0)
+    sel.add_argument(
+        "--output",
+        type=Path,
+        help="Default: update --input; a separate output must be new.",
+    )
+    sel.add_argument("--cache", type=Path, default=Path(".cache/hypotheses"))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    require(
-        0 <= args.threshold <= 1 and args.top_k > 0 and args.repeats > 0,
-        "Invalid threshold/top-k/repeats.",
-    )
-    items = read_items(args.items, args.difficulty)
-    splits = make_splits(
-        items,
-        args.v_size,
-        args.t_size,
-        args.seed,
-        json.loads(args.splits.read_text()) if args.splits else None,
-    )
-    plan = sample_plan(
-        items, splits, args.group_rounds, args.pair_rounds, args.min_gap, args.seed
-    )
-    require(len(splits["V"]) >= 14, "Selection requires at least 14 V items.")
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            {"items": items, "splits": splits, "plan": plan}, sort_keys=True
-        ).encode()
-    ).hexdigest()
-    print(
-        json.dumps(
-            {
-                "splits": {k: len(v) for k, v in splits.items()},
-                "generation_calls": len(plan),
-                "item_presentations": args.group_rounds * 40 + args.pair_rounds * 10,
-                "note": "Refinement and matching calls depend on generated hypothesis count; retries may add cost.",
-            },
-            indent=2,
+
+    if args.command == "prepare":
+        require(not args.output.exists(), "Output exists; choose a new output path.")
+        payload = json.loads(args.difficulty.read_text())
+        response_hash = (
+            payload.get("response_sha256") if isinstance(payload, dict) else None
         )
-    )
-    if not args.execute:
+        if args.responses:
+            require(
+                response_hash is not None,
+                "IRT output lacks a response checksum; cannot verify --responses.",
+            )
+            require(
+                file_sha256(args.responses) == response_hash,
+                "Response matrix checksum differs from the IRT fit input.",
+            )
+            shape = np.load(args.responses, allow_pickle=False, mmap_mode="r").shape
+            require(
+                list(shape) == payload["matrix_shape"],
+                "Response matrix shape differs from the IRT fit.",
+            )
+        items = read_items(args.items, args.difficulty)
+        splits = make_splits(
+            items,
+            args.v_size,
+            args.t_size,
+            args.seed,
+            json.loads(args.splits.read_text()) if args.splits else None,
+        )
+        require(len(splits["G"]) >= 200, "Group generation needs at least 200 G items.")
+        require(
+            len(splits["V"]) >= 14, "Default Lasso selection needs at least 14 V items."
+        )
+        save(
+            args.output,
+            {
+                "schema_version": 1,
+                "items": items,
+                "splits": splits,
+                "source": {
+                    "response_sha256": response_hash,
+                    "difficulty_sha256": file_sha256(args.difficulty),
+                    "items_sha256": file_sha256(args.items),
+                    "split_seed": args.seed,
+                },
+            },
+        )
+        print(json.dumps({k: len(v) for k, v in splits.items()}))
+    elif args.command == "select":
+        output = args.output or args.input
+        in_place = output.resolve() == args.input.resolve()
+        require(
+            in_place or not output.exists(), "Output exists; choose a new output path."
+        )
+        result = apply_selection(
+            json.loads(args.input.read_text()),
+            args.top_k,
+            args.repeats,
+            args.seed,
+            args.sample_fraction,
+            args.cv_folds,
+        )
+        if in_place:
+            # Preserve the previous result before atomically replacing it.
+            save(
+                args.cache / f"selection-input-{file_sha256(args.input)}.json",
+                json.loads(args.input.read_text()),
+            )
+        save(output, result)
+        print(f"Selected {result['counts']['selected']} hypotheses: {output}")
         return
-    require(not args.output.exists(), "Output exists; choose a new output path.")
-    require(
-        bool(os.environ.get("GEMINI_API_KEY")), "Set GEMINI_API_KEY before execution."
-    )
-    result = run(items, splits, plan, CachedClient(args.cache), args)
-    result["input_plan_sha256"] = fingerprint
-    save(args.output, result)
+    else:
+        require(0 <= args.threshold <= 1, "Invalid cosine threshold.")
+        prepared = json.loads(args.input.read_text())
+        items = prepared["items"]
+        require(
+            all(
+                isinstance(r.get("text"), str)
+                and r["text"].strip()
+                and np.isfinite(r["difficulty"])
+                for r in items
+            ),
+            "Invalid prepared items.",
+        )
+        splits = make_splits(items, 0, 0, args.seed, prepared["splits"])
+        plan = sample_plan(
+            items, splits, args.group_rounds, args.pair_rounds, args.min_gap, args.seed
+        )
+        print(
+            json.dumps(
+                {
+                    "splits": {k: len(v) for k, v in splits.items()},
+                    "generation_calls": len(plan),
+                    "item_presentations": args.group_rounds * 40
+                    + args.pair_rounds * 10,
+                    "note": "Refinement and matching add calls; retries may add cost.",
+                },
+                indent=2,
+            )
+        )
+        if not args.execute:
+            return
+        require(not args.output.exists(), "Output exists; choose a new output path.")
+        require(
+            bool(os.environ.get("GEMINI_API_KEY")),
+            "Set GEMINI_API_KEY before execution.",
+        )
+        result = run(items, splits, plan, CachedClient(args.cache), args)
+        result["source"] = prepared.get("source", {})
+        result["prepared_sha256"] = file_sha256(args.input)
+        save(args.output, result)
     print(args.output)
 
 
