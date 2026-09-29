@@ -1,24 +1,18 @@
 # Explain Difficulty
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square)](#installation)
-[![IRT](https://img.shields.io/badge/IRT-1PL-527B8B?style=flat-square)](#1-fit-irt)
-[![Sampling](https://img.shields.io/badge/Sampling-30%20group%20%2B%2050%20pair-C9752D?style=flat-square)](#2-discover-hypotheses)
-
 **From model responses to interpretable hypotheses about question difficulty.**
 
 Fit item response theory (IRT) to a response matrix, then discover question
 properties through group and pair contrasts. Two packages, two main outputs.
 
-[Installation](#installation) · [Fit IRT](#1-fit-irt) · [Discover hypotheses](#2-discover-hypotheses) · [Input formats](#input-formats)
-
-![Method overview: difficulty estimation, contrastive hypothesis generation, and hypothesis selection.](assets/method.png)
+[Installation](#installation) · [Input formats](#input-formats) · [Fit IRT](#1-fit-irt) · [Discover hypotheses](#2-discover-hypotheses)
 
 ## Installation
 
 Python **3.10+**. Install from source:
 
 ```bash
-git clone --branch master https://github.com/pengcuix/explain-difficulty.git
+git clone --branch main https://github.com/pengcuix/explain-difficulty.git
 cd explain-difficulty
 python -m pip install -e '.[irt,hypotheses]'
 ```
@@ -30,6 +24,51 @@ Use `python -m pip install -e '.[irt]'` for IRT only, or
 `python -m pip install -e '.[hypotheses]'` for hypothesis discovery only.
 
 </details>
+
+## Input formats
+
+Include every question from the response matrix. Records are joined by `item_id`,
+not file position, so question records may be shuffled.
+
+<details>
+<summary>JSON / JSONL</summary>
+
+```json
+[
+  {
+    "item_id": "0",
+    "question": "What is 2 + 3?",
+    "answer": "5",
+    "explanation": "Add the two quantities."
+  },
+  {
+    "item_id": "1",
+    "question": "What is 8 - 2?",
+    "answer": "6"
+  }
+]
+```
+
+For JSONL, put one object per line without the outer list.
+
+</details>
+
+<details>
+<summary>CSV</summary>
+
+```csv
+item_id,question,answer,explanation
+0,What is 2 + 3?,5,Add the two quantities.
+1,What is 8 - 2?,6,Subtract 2 from 8.
+```
+
+Use standard CSV quoting for commas or line breaks inside a field.
+
+</details>
+
+`answer` and `explanation` are optional reference fields; when supplied, both are
+included in generation and matching. Without custom IDs, `"7"` refers to matrix
+row 7 (the eighth question). CSV IDs are read as strings.
 
 ## 1. Fit IRT
 
@@ -168,51 +207,6 @@ hypothesis order or matrix alignment. The previous JSON is backed up in
 Selection can be rerun without regenerating or rematching hypotheses.
 
 </details>
-
-## Input formats
-
-Include every question from the response matrix. Records are joined by `item_id`,
-not file position, so question records may be shuffled.
-
-<details>
-<summary>JSON / JSONL</summary>
-
-```json
-[
-  {
-    "item_id": "0",
-    "question": "What is 2 + 3?",
-    "answer": "5",
-    "explanation": "Add the two quantities."
-  },
-  {
-    "item_id": "1",
-    "question": "What is 8 - 2?",
-    "answer": "6"
-  }
-]
-```
-
-For JSONL, put one object per line without the outer list.
-
-</details>
-
-<details>
-<summary>CSV</summary>
-
-```csv
-item_id,question,answer,explanation
-0,What is 2 + 3?,5,Add the two quantities.
-1,What is 8 - 2?,6,Subtract 2 from 8.
-```
-
-Use standard CSV quoting for commas or line breaks inside a field.
-
-</details>
-
-`answer` and `explanation` are optional reference fields; when supplied, both are
-included in generation and matching. Without custom IDs, `"7"` refers to matrix
-row 7 (the eighth question). CSV IDs are read as strings.
 
 ## Outputs
 
