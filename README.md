@@ -1,38 +1,65 @@
 # Explain Difficulty
 
-Fit IRT to a response matrix, then discover and select hypotheses explaining item difficulty.
-The code has two packages: `irt` and `hypotheses`.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square)](#installation)
+[![IRT](https://img.shields.io/badge/IRT-1PL-527B8B?style=flat-square)](#1-fit-irt)
+[![Sampling](https://img.shields.io/badge/Sampling-30%20group%20%2B%2050%20pair-C9752D?style=flat-square)](#2-discover-hypotheses)
 
-## Install
+**From model responses to interpretable hypotheses about question difficulty.**
 
-Python 3.10 or newer, from the repository root:
+Fit item response theory (IRT) to a response matrix, then discover question
+properties through group and pair contrasts. Two packages, two main outputs.
+
+[Installation](#installation) · [Fit IRT](#1-fit-irt) · [Discover hypotheses](#2-discover-hypotheses) · [Input formats](#input-formats)
+
+![Workflow: fit IRT to model responses; contrast questions; refine, match and select hypotheses.](assets/overview.svg)
+
+## Installation
+
+Python **3.10+**. Install from source:
 
 ```bash
+git clone --branch master https://github.com/pengcuix/explain-difficulty.git
+cd explain-difficulty
 python -m pip install -e '.[irt,hypotheses]'
 ```
 
+<details>
+<summary>Install only one package</summary>
+
+Use `python -m pip install -e '.[irt]'` for IRT only, or
+`python -m pip install -e '.[hypotheses]'` for hypothesis discovery only.
+
+</details>
+
 ## 1. Fit IRT
 
-Provide `data/responses.npy`: a NumPy matrix with **questions in rows and models in
-columns**. Use `1` for correct, `0` for incorrect, and `-1` or `NaN` for missing.
-Missing entries are excluded from fitting. All-missing rows or columns are rejected.
+Start with `responses.npy`: **rows are questions, columns are models**.
+Entries are `1` (correct), `0` (incorrect), and `-1` or `NaN` (missing).
 
 ```bash
-python -m irt.fit --responses data/responses.npy --epochs 500 --lr 0.1 --seed 0 --output output/irt_results.json
+python -m irt.fit --responses responses.npy --epochs 500 --lr 0.1 --seed 0
 ```
 
-- `--responses`: input response matrix.
-- `--epochs`, `--lr`: number of fitting epochs and initial learning rate.
-- `--seed`: random seed.
-- `--output`: JSON containing item difficulties, model abilities and posterior SDs.
+`--responses` specifies the matrix; `--epochs` and `--lr` control fitting;
+`--seed` fixes the random seed.
 
-The model is hierarchical 1PL, fitted with py-irt on CPU:
-`P(correct) = sigmoid(ability - difficulty)`. Larger difficulty means harder.
-Check convergence when choosing the number of epochs.
+**Output:** `output/irt_results.json` — item difficulties, model abilities and
+posterior standard deviations. Larger difficulty means harder.
 
-By default, item ID `"0"` is matrix row 0, `"1"` is row 1, and so on. To use your own
-IDs, add `--item-ids data/item_ids.json`; this must be a JSON list in matrix row order.
-`--model-ids data/model_ids.json` similarly supplies IDs in column order.
+<details>
+<summary>Model, item IDs and output options</summary>
+
+- Hierarchical **1PL**, fitted with py-irt on CPU:
+  `P(correct) = sigmoid(ability - difficulty)`.
+- Missing responses are excluded. All-missing rows or columns are rejected.
+- Default item IDs are zero-based row indices: `"0"`, `"1"`, …
+  For custom IDs, pass `--item-ids item_ids.json`, a JSON list in matrix row order.
+  `--model-ids model_ids.json` supplies IDs in column order.
+- Use `--output path.json` to change the destination. Existing fits are not overwritten.
+- Check convergence when choosing the number of epochs. Posterior SD measures
+  uncertainty in an estimate, not the spread of difficulties across questions.
+
+</details>
 
 ## 2. Discover hypotheses
 
@@ -42,101 +69,162 @@ IDs, add `--item-ids data/item_ids.json`; this must be a JSON list in matrix row
 export GEMINI_API_KEY="your-api-key"
 ```
 
-Only generation, refinement and matching need the API. IRT, preprocessing and Lasso
-selection run locally. Do not commit your key.
+The API is used for generation, refinement and matching.
+IRT, data preparation and Lasso selection run locally. Do not commit your key.
 
 ### 2.2 Prepare questions and splits
 
-Provide a JSON list (`data/items.json`), CSV, or JSONL file. Each record needs
-`item_id` and `question`; `answer` and `explanation` are optional reference fields.
-When present, both are included in generation and matching.
-
-```json
-[
-  {"item_id": "0", "question": "What is 2 + 3?", "answer": "5", "explanation": "Add the two quantities."},
-  {"item_id": "1", "question": "What is 8 - 2?", "answer": "6", "explanation": "Subtract 2 from 8."}
-]
-```
-
-For CSV, use the same field names as column headers. Include **every question from
-the response matrix**, with the same IDs used in step 1. Records may be shuffled:
-the code joins by ID and restores matrix order, not file row order. Without custom
-IDs, `item_id: "7"` therefore means row 7 of `responses.npy` (the eighth question).
+Provide `items.json`, `items.csv` or `items.jsonl` with `item_id` and `question`
+fields ([format examples](#input-formats)). IDs must match the matrix from step 1.
 
 ```bash
-python -m hypotheses.discover prepare --items data/items.json --difficulty output/irt_results.json --responses data/responses.npy --v-size 400 --t-size 200 --seed 0 --output .cache/prepared.json
+python -m hypotheses.discover prepare --items items.json --difficulty output/irt_results.json --responses responses.npy --v-size 400 --t-size 200
 ```
 
-- `--items`: question file; change the path to use CSV or JSONL.
-- `--difficulty`: IRT result from step 1, joined to questions by `item_id`.
-- `--responses`: verifies that the original `.npy` file matches the IRT fit's checksum and shape.
-- `--v-size`, `--t-size`: numbers of items assigned to V (selection) and T (held out).
-  The remainder form G (generation). Splits are disjoint and difficulty-stratified.
-- `--seed`: split seed; `--output`: prepared questions, difficulties and splits.
+`--items` supplies question text; `--difficulty` supplies fitted IRT parameters;
+`--responses` verifies the original matrix. `--v-size` and `--t-size` set the
+selection and test sizes; the remaining questions form the generation split.
 
-Choose sizes appropriate for your dataset: G needs at least 200 questions and V
-needs at least 14 for the default selection settings. To reuse existing splits,
-add `--splits data/splits.json` containing `{"G": [...], "V": [...], "T": [...]}`
-with item-ID lists; this overrides the split sizes and must cover all input items.
+**Output:** `.cache/prepared.json` — aligned questions, difficulties and G/V/T splits.
+
+<details>
+<summary>Split sizes and existing splits</summary>
+
+Splits are disjoint and difficulty-stratified. **G** is used for generation,
+**V** for Lasso selection, and **T** is held out from both.
+
+G needs at least **200** questions; V needs at least **14** with the default
+selection settings. Adjust the split sizes to your dataset. The default seed is 0;
+change it with `--seed`.
+
+To reuse a split, add `--splits splits.json` containing
+`{"G": [...], "V": [...], "T": [...]}` with item-ID lists covering every question.
+This overrides the split sizes. Use `--output` to change the prepared-file path.
+
+</details>
 
 ### 2.3 Generate, refine and match
 
 ```bash
-python -m hypotheses.discover generate --input .cache/prepared.json --group-rounds 30 --pair-rounds 50 --min-gap 4.0 --propose-model gemini-3.1-pro-preview --match-model gemini-3.7-flash --output output/hypotheses_results.json --execute
+python -m hypotheses.discover generate --input .cache/prepared.json --group-rounds 30 --pair-rounds 50 --min-gap 4.0 --execute
 ```
 
-- `--input`: prepared file from step 2.2, already aligned to the response matrix.
-- `--group-rounds`: rounds showing 20 harder and 20 easier G items per round.
-- `--pair-rounds`: rounds showing five hard/easy G pairs per round.
-- `--min-gap`: minimum IRT difficulty gap within each pair.
-- `--propose-model`, `--match-model`: API models for generation/refinement and matching.
-- `--execute`: enables paid API calls. Omit it to validate sampling without calling the API.
-- `--output`: refined hypotheses and a binary item-by-hypothesis matching matrix.
+`--group-rounds` shows 20 harder and 20 easier questions per round;
+`--pair-rounds` shows five hard/easy pairs per round.
+`--min-gap` sets the minimum pairwise difficulty gap.
 
-This runs **30 group + 50 pair rounds** by default, followed by exact-text and strict
-semantic deduplication, semantic-family refinement, and fresh matching against all
-questions. Generation uses G only; matching does not expose difficulty to the judge.
-The default cosine threshold is 0.85 (`--threshold`). The local embedding model is
-`Qwen/Qwen3-Embedding-4B` (`--embedding-model`); its weights download on first use
-and require sufficient memory. Model names can be changed to ones your account supports.
+**Output:** `output/hypotheses_results.json` — refined hypotheses and their
+binary matching matrix, with explicit item and hypothesis IDs.
 
-If the requested sampling plan is infeasible, the command stops before API calls.
-Validated responses are cached in `.cache/hypotheses/`; rerun an interrupted command
-to reuse them. Keep the cache to avoid repeat calls. Retries may incur extra charges.
-IRT, preparation and generation do not overwrite existing outputs.
+> Omit `--execute` to validate the sampling plan without making paid API calls.
 
-### 2.4 Select hypotheses with stability Lasso
+<details>
+<summary>Models, refinement and caching</summary>
+
+- `--propose-model`: generation/refinement model; default `gemini-3.1-pro-preview`.
+- `--match-model`: matching model; default `gemini-3.7-flash`.
+- `--embedding-model`: local embedding model; default `Qwen/Qwen3-Embedding-4B`.
+  Weights download on first use and require sufficient disk space and memory.
+- `--threshold`: cosine-similarity threshold for candidate semantic comparisons;
+  default **0.85**. Model names can be changed to ones your account supports.
+- Exact-text deduplication is followed by strict semantic deduplication,
+  semantic-family refinement and fresh matching against all questions.
+  The judge does not see IRT difficulty. Prompts are in
+  [`hypotheses/prompts.py`](hypotheses/prompts.py).
+- Validated API responses are cached in `.cache/hypotheses/`.
+  Rerun an interrupted command to reuse them; retries can incur additional charges.
+- An infeasible sampling plan stops before API calls. Use `--output` for a new
+  result path; generation does not overwrite existing results.
+
+</details>
+
+### 2.4 Select with stability Lasso
 
 ```bash
-python -m hypotheses.discover select --input output/hypotheses_results.json --top-k 20 --repeats 100 --sample-fraction 0.75 --cv-folds 5 --seed 0
+python -m hypotheses.discover select --input output/hypotheses_results.json --top-k 20 --repeats 100 --sample-fraction 0.75 --cv-folds 5
 ```
 
-- `--input`: hypotheses, matches and difficulties saved in step 2.3.
-- `--top-k`: maximum number of hypotheses to retain; fixed by you, not tuned on T.
-- `--repeats`: number of Lasso fits on random subsamples of V.
-- `--sample-fraction`: fraction of V sampled without replacement per fit.
-- `--cv-folds`: folds used to choose the regularization weight within each subsample.
-- `--seed`: subsampling and cross-validation seed.
+`--top-k` limits the number retained; `--repeats` controls the number of fits.
+Each fit samples `--sample-fraction` of V and uses `--cv-folds` to choose its
+Lasso regularization weight.
 
-Each fit chooses its own Lasso alpha by cross-validation over 25 log-spaced values
-from `1e-4` to `1`. Features are standardized inside each fold. Hypotheses are ranked
-by nonzero-coefficient frequency, then mean absolute standardized coefficient.
-At most `--top-k` hypotheses with nonzero frequency are retained. Only V is used.
+**Output:** selection flags, ranks and frequencies are added to the **same**
+hypothesis result file. This step makes no API calls.
 
-Selection adds `selected`, `rank` and `selection_frequency` to each hypothesis in
-the **same result JSON**, preserving hypothesis order and matching-matrix alignment.
-The previous file is backed up in `.cache/hypotheses/`. Add `--output new_result.json`
-to save separately. You can rerun selection with different settings without API calls.
+<details>
+<summary>Selection rule and rerunning selection</summary>
 
-The two main outputs are `output/irt_results.json` and `output/hypotheses_results.json`.
-The latter includes explicit row item IDs, column hypothesis IDs, splits and selection
-settings. Temporary preparation data and API caches stay in `.cache/` (ignored by Git).
-Do not run concurrent commands against the same output or cache directory.
+Each fit chooses alpha from 25 log-spaced values between `1e-4` and `1`.
+Standardization is fitted inside each CV fold. Rank by nonzero-coefficient frequency,
+then mean absolute standardized coefficient, then original order.
+Retain at most `--top-k` hypotheses with nonzero frequency.
 
-Prompts are in `hypotheses/prompts.py`. This release provides the consolidated 30+50
-workflow; historical run settings and external model outputs can differ.
+Only V is used. Choose `--top-k` yourself; it is not optimized on T.
+The default seed is 0 (`--seed`).
 
-## Tests
+The result adds `selected`, `rank` and `selection_frequency` without changing
+hypothesis order or matrix alignment. The previous JSON is backed up in
+`.cache/hypotheses/`. Use `--output new_result.json` to save separately.
+Selection can be rerun without regenerating or rematching hypotheses.
+
+</details>
+
+## Input formats
+
+Include every question from the response matrix. Records are joined by `item_id`,
+not file position, so question records may be shuffled.
+
+<details>
+<summary>JSON / JSONL</summary>
+
+```json
+[
+  {
+    "item_id": "0",
+    "question": "What is 2 + 3?",
+    "answer": "5",
+    "explanation": "Add the two quantities."
+  },
+  {
+    "item_id": "1",
+    "question": "What is 8 - 2?",
+    "answer": "6"
+  }
+]
+```
+
+For JSONL, put one object per line without the outer list.
+
+</details>
+
+<details>
+<summary>CSV</summary>
+
+```csv
+item_id,question,answer,explanation
+0,What is 2 + 3?,5,Add the two quantities.
+1,What is 8 - 2?,6,Subtract 2 from 8.
+```
+
+Use standard CSV quoting for commas or line breaks inside a field.
+
+</details>
+
+`answer` and `explanation` are optional reference fields; when supplied, both are
+included in generation and matching. Without custom IDs, `"7"` refers to matrix
+row 7 (the eighth question). CSV IDs are read as strings.
+
+## Outputs
+
+- **`output/irt_results.json`** — IRT parameters and input provenance.
+- **`output/hypotheses_results.json`** — hypotheses, matches, splits and selection.
+
+Prepared data, cached API responses and selection backups stay in `.cache/`,
+which is ignored by Git. Do not run concurrent commands against the same output
+or cache directory.
+
+<details>
+<summary>Development and tests</summary>
 
 ```bash
 python -m pip install -e '.[irt,hypotheses,test]'
@@ -144,3 +232,9 @@ python -m pytest -q
 ```
 
 Tests use synthetic data and mocked API responses; no paid API calls are made.
+Source packages: [`irt/`](irt/) and [`hypotheses/`](hypotheses/).
+
+This is the consolidated 30+50 workflow. Historical run settings and external
+model outputs can differ.
+
+</details>
