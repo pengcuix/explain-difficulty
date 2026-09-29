@@ -1,0 +1,92 @@
+# All project-structure exclusions below are anchored with a leading `/` so
+# they match only the top-level directory of that name, not a same-named
+# directory nested elsewhere -- e.g. `data/` (unanchored) would also match and
+# silently swallow `src/data/`, a legitimate Python package. Always anchor a
+# top-level convention directory; never rely on the bare name.
+
+# ---- Docs -------------------------------------------------------------------
+# Kept out of GitHub by standing preference, not because it's regenerable --
+# this is hand-written narrative (idea.md, code.md, experiment.md, papers).
+# Only code, scripts, and configs get versioned.
+/docs/
+
+# ---- Data, logs, generated artifacts ----------------------------------------
+# These are never versioned: they are large, regenerable, and (per the global
+# CLAUDE.md "never overwrite old data" rule) their history is protected by
+# versioned filenames on disk, not by git.
+/data/
+/log/
+/logs/
+
+# Scratch space -- throwaway by definition, nothing here is worth versioning.
+/tmp/
+
+# NOTE the `/outputs/*` below, NOT `/outputs/`. Git does not descend into an
+# excluded directory, so `/outputs/` would make the negation on the next line
+# silently dead -- results would never be committed and nothing would warn you.
+# Excluding the directory's *contents* keeps the negation live. (Verified.)
+/outputs/*
+
+# Exception: experiment findings ARE versioned. They are small text files
+# recording numbers plus the command that reproduces them, and having their
+# history is what makes a result traceable months later. Delete this line if you
+# would rather keep results out of git entirely.
+!/outputs/results/
+
+# ---- Model / array / binary formats (anywhere in the tree) ------------------
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.parquet
+*.arrow
+*.feather
+
+# ---- Build / packaging output ----------------------------------------------
+build/
+dist/
+*.egg-info/
+*.zip
+*.tar
+*.tar.gz
+
+# ---- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Credentials -- never commit these --------------------------------------
+.env
+.env.*
+*.pem
+*.key
+secrets.*
+credentials.*
+*_token
+*_token.txt
+
+# ---- OS / editor -------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- Claude Code local config -------------------------------------------------
+# Never tracked, in any project (global CLAUDE.md rule) -- settings and local
+# config stay on disk but must never reach a remote.
+/.claude/
