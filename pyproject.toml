@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "explain-difficulty"
+version = "0.1.0"
+description = "IRT difficulty estimation and contrastive hypothesis discovery"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<3"]
+
+[project.optional-dependencies]
+irt = ["py-irt==0.6.6"]
+hypotheses = ["scikit-learn>=1.4,<2", "google-genai>=1.30,<2", "sentence-transformers>=3,<6"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+fit-irt = "irt.fit:main"
+discover-hypotheses = "hypotheses.discover:main"
+
+[tool.setuptools.packages.find]
+include = ["irt*", "hypotheses*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
