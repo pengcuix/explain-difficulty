@@ -11,7 +11,7 @@ properties through group and pair contrasts. Two packages, two main outputs.
 
 [Installation](#installation) · [Fit IRT](#1-fit-irt) · [Discover hypotheses](#2-discover-hypotheses) · [Input formats](#input-formats)
 
-![Workflow: fit IRT to model responses; contrast questions; refine, match and select hypotheses.](assets/overview.svg)
+![Method overview: difficulty estimation, contrastive hypothesis generation, and hypothesis selection.](assets/method.png)
 
 ## Installation
 
