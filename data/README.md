@@ -5,8 +5,13 @@ exported benchmark collection, not only the three datasets used in the paper.
 
 | File | Contents | Size |
 | --- | --- | --- |
+| [`all_response_matrix_q_by_m.npy` (Google Drive)](https://drive.google.com/file/d/1IDf2ekLvq6U9o28Yiu8dXmxj_vMCRpHo/view?usp=drivesdk) | 50,265 × 8,577 response matrix | 1,724,491,748 bytes |
 | [`all_benchmarks_dataset_new.json`](all_benchmarks_dataset_new.json) | 50,265 question records | 39,621,075 bytes |
 | [`column_to_llm.json`](column_to_llm.json) | 8,577 model names, indexed by matrix column | 400,032 bytes |
+
+Use the **Download** button on the Google Drive page for the response matrix;
+the two JSON files are included in this repository. Save the downloaded matrix
+in this directory without changing its filename.
 
 ## Matrix alignment
 
