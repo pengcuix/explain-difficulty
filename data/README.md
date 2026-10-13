@@ -26,12 +26,6 @@ The corresponding response matrix is `all_response_matrix_q_by_m.npy`:
   except that TruthfulQA contains fractional MC2 scores. Preserve these values;
   do not cast the entire matrix to an integer type.
 
-Matrix SHA-256:
-
-```text
-22d224b88d41395bf9e58abe4ca779d3e1c4473b29bcc6426243cc616ffa219e
-```
-
 ## Question fields and preprocessing
 
 Question text is in `problem`; `source` identifies the benchmark or subtask.
