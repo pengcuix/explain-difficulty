@@ -1,5 +1,8 @@
 # Local data, results, and response caches
-/data/
+/data/*
+!/data/README.md
+!/data/column_to_llm.json
+!/data/all_benchmarks_dataset_new.json
 /output/
 /outputs/
 /.cache/

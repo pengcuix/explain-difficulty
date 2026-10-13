@@ -5,7 +5,7 @@
 Fit item response theory (IRT) to a response matrix, then discover question
 properties through group and pair contrasts. Two packages, two main outputs.
 
-[Installation](#installation) · [Input formats](#input-formats) · [Fit IRT](#1-fit-irt) · [Discover hypotheses](#2-discover-hypotheses)
+[Installation](#installation) · [Input formats](#input-formats) · [Data](data/README.md) · [Fit IRT](#1-fit-irt) · [Discover hypotheses](#2-discover-hypotheses)
 
 ## Installation
 
@@ -26,6 +26,10 @@ Use `python -m pip install -e '.[irt]'` for IRT only, or
 </details>
 
 ## Input formats
+
+Original question texts and model names are available in [`data/`](data/README.md),
+with their response-matrix row and column mappings. Their original field names
+differ from the command-line input format below; see the data notes before use.
 
 Include every question from the response matrix. Records are joined by `item_id`,
 not file position, so question records may be shuffled.
